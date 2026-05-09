@@ -43,6 +43,7 @@ def main() -> int:
 
     # Top-level .jsonl files only (the per-session transcripts), not subagent files.
     jsonls = []
+    skipped_small = 0
     for project_dir in root.iterdir():
         if not project_dir.is_dir():
             continue
@@ -52,6 +53,7 @@ def main() -> int:
             except OSError:
                 continue
             if st.st_size < args.min_bytes:
+                skipped_small += 1
                 continue
             jsonls.append((st.st_mtime, f))
 
@@ -62,6 +64,12 @@ def main() -> int:
     elif args.days is not None:
         cutoff = time.time() - args.days * 86400
         jsonls = [(m, f) for (m, f) in jsonls if m >= cutoff]
+
+    if skipped_small:
+        print(
+            f"note: skipped {skipped_small} file(s) under {args.min_bytes} bytes",
+            file=sys.stderr,
+        )
 
     for _, f in jsonls:
         print(str(f))

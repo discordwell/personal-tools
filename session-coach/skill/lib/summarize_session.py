@@ -94,12 +94,16 @@ def main() -> int:
     session_id = None
     title = None
     last_prompt = None
+    malformed = 0
 
     with open(args.path, encoding="utf-8", errors="replace") as f:
         for idx, raw in enumerate(f):
+            if not raw.strip():
+                continue
             try:
                 obj = json.loads(raw)
             except json.JSONDecodeError:
+                malformed += 1
                 continue
 
             t = obj.get("type")
@@ -174,14 +178,16 @@ def main() -> int:
         "title": title,
         "lastPrompt": _truncate(last_prompt or "", args.max_text),
         "eventCount": len(out),
+        "malformed": malformed,
     }))
 
-    # Cap total events; keep oldest first so flow is readable.
+    # Cap total events; keep oldest first so flow is readable. Reserve one slot
+    # for the elided marker so total output stays bounded by max_events.
     if len(out) > args.max_events:
-        # Keep first 1/3 and last 2/3 — ends usually richer in pain points.
-        head = args.max_events // 3
-        tail = args.max_events - head
-        out = out[:head] + [{"kind": "elided", "skipped": len(out) - args.max_events}] + out[-tail:]
+        head = (args.max_events - 1) // 3
+        tail = (args.max_events - 1) - head
+        skipped = len(out) - head - tail
+        out = out[:head] + [{"kind": "elided", "skipped": skipped}] + out[-tail:]
 
     for e in out:
         print(json.dumps(e, ensure_ascii=False))

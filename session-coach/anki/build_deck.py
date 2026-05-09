@@ -150,6 +150,8 @@ def main() -> int:
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--deck-name", required=True)
     args = p.parse_args()
+    if args.output.exists():
+        print(f"note: overwriting existing {args.output}", file=sys.stderr)
     return build(args.input, args.output, args.deck_name)
 
 

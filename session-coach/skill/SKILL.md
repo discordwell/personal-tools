@@ -29,9 +29,11 @@ Cap the number of sessions analyzed at 25. If more than 25 are returned, take th
 
 ### Step 2 — Summarize each session
 
-For each path, run `python3 /Users/discordwell/Projects/personal-tools/session-coach/skill/lib/summarize_session.py <path>` and read the NDJSON output. The first line is a header (`{"kind":"header", "sessionId", "title", "lastPrompt", "eventCount"}`); the rest are events.
+For each path, run `python3 /Users/discordwell/Projects/personal-tools/session-coach/skill/lib/summarize_session.py <path>` and read the NDJSON output. The first line is a header (`{"kind":"header", "sessionId", "title", "lastPrompt", "eventCount", "malformed"}`); the rest are events.
 
 Use the header's `title` (and short `sessionId` slug — first 8 chars) as the citation handle: e.g. `[973673b5: "Ask about Claude Code session logging"]`.
+
+If the header reports `eventCount: 0`, drop that session from the analysis pool — there's nothing useful to scan. If `malformed` is non-zero, note it in the journal entry but proceed; partial data is still usable.
 
 Do not dump the raw output back to the user. Use it only to derive the patterns below.
 
@@ -76,7 +78,7 @@ Determine the target memory directories — write each memory to **both** of:
 1. **Anchor directory** — `/Users/discordwell/.claude/projects/-Users-discordwell-Projects-bad-idea-discord/memory/`. This is the user's primary project; memories land here regardless of cwd so insights aggregate in one place.
 2. **Cwd directory** — `~/.claude/projects/<cwd-slug>/memory/`, where `<cwd-slug>` is the absolute cwd with `/` → `-` (e.g. `/Users/discordwell/Projects/foo` → `-Users-discordwell-Projects-foo`).
 
-If both paths resolve to the same directory (skill invoked from bad-idea-discord), write once. Otherwise write the same content to both. Create either directory if it doesn't exist. Mention all destination paths to the user so they know where memories landed.
+If both paths resolve to the same directory (skill invoked from bad-idea-discord), write once. Otherwise write the same content to both. Use `mkdir -p` to create either directory if it doesn't exist. Mention all destination paths to the user so they know where memories landed.
 
 For each memory, write a file named `feedback_<short_topic>.md` (lowercase, underscores) with this exact format:
 
@@ -107,7 +109,7 @@ Aim for 0–3 memory entries — quality over quantity. If nothing rises to the 
 
 Cover the top knowledge gaps (and optionally a few key tool-usage facts the user clearly hasn't internalized). Aim for **5–15 cards**. Quality over quantity — skip the deck entirely if fewer than 3 strong cards emerge, and tell the user.
 
-1. Write `cards.json` to a tmp path, e.g. `/tmp/session-coach-cards-<YYYYMMDD>.json`. Schema:
+1. Write `cards.json` to a tmp path, e.g. `/tmp/session-coach-cards-YYYY-MM-DD.json`. Schema:
 
        [
          { "front": "...", "back": "...", "tags": ["claude-code"] }
@@ -119,7 +121,7 @@ Cover the top knowledge gaps (and optionally a few key tool-usage facts the user
 2. Build the deck:
 
        python3 /Users/discordwell/Projects/personal-tools/session-coach/anki/build_deck.py \
-         --input /tmp/session-coach-cards-<YYYYMMDD>.json \
+         --input /tmp/session-coach-cards-YYYY-MM-DD.json \
          --output /Users/discordwell/Projects/personal-tools/session-coach/decks/session-coach-YYYY-MM-DD.apkg \
          --deck-name "Session Coach"
 

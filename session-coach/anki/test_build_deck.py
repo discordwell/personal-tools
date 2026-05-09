@@ -27,7 +27,7 @@ def count_expected_notes(sample: Path) -> int:
     )
 
 
-def run_cli(output: Path) -> None:
+def run_cli(output: Path) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         [sys.executable, str(BUILD),
          "--input", str(SAMPLE),
@@ -36,6 +36,7 @@ def run_cli(output: Path) -> None:
         capture_output=True, text=True,
     )
     assert result.returncode == 0, f"CLI exited {result.returncode}: {result.stderr}"
+    return result
 
 
 def assert_valid_apkg(apkg: Path, expected_notes: int) -> None:
@@ -71,10 +72,22 @@ def test_build_smoke() -> None:
     expected = count_expected_notes(SAMPLE)
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "deck.apkg"
-        run_cli(out)
+        first = run_cli(out)
+        assert "overwriting" not in first.stderr, "first build should not warn"
         assert_valid_apkg(out, expected)
+
+
+def test_overwrite_warning() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "deck.apkg"
+        run_cli(out)
+        second = run_cli(out)
+        assert "overwriting" in second.stderr, (
+            f"expected overwrite warning in stderr, got: {second.stderr!r}"
+        )
 
 
 if __name__ == "__main__":
     test_build_smoke()
+    test_overwrite_warning()
     print("OK")
