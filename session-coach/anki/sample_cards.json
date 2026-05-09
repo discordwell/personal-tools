@@ -1,0 +1,32 @@
+[
+  {
+    "front": "Which Claude Code tool should you prefer over `cat` for reading files?",
+    "back": "The Read tool. It's purpose-built for file reading and integrates with the harness's file-state tracking.",
+    "tags": ["claude-code", "tool-use"]
+  },
+  {
+    "front": "What does \"thrashing\" mean in the context of agent sessions?",
+    "back": "Repeated tool calls with similar inputs, edit/revert/edit cycles, or retry loops — usually a sign of an unclear plan or a fight against the harness.",
+    "tags": ["claude-code"]
+  },
+  {
+    "front": "When should you reach for an interval `/loop` vs. dynamic `/loop`?",
+    "back": "Use an interval when the cadence is fixed (e.g. \"every 5 min\"). Use dynamic when the model should self-pace based on what it's waiting for.",
+    "tags": []
+  },
+  {
+    "front": "Show a minimal `genanki` Note construction.",
+    "back": "import genanki\nnote = genanki.Note(\n    model=my_model,\n    fields=['Front text', 'Back text'],\n    tags=['example'],\n)",
+    "tags": ["python", "genanki"]
+  },
+  {
+    "front": "Unicode & symbol stress: rocket, snowman, em-dash, smart quotes — do they render?",
+    "back": "Yes — rocket, snowman, em-dash, and “smart quotes” all preserve through HTML escaping; only angle brackets get entity-encoded.",
+    "tags": ["unicode"]
+  },
+  {
+    "front": "Multi-line answer test: list three things.",
+    "back": "Line one of the answer.\nLine two — with an em-dash.\nLine three with `inline code` and <em>html</em> that should be escaped before rendering.",
+    "tags": ["formatting"]
+  }
+]

@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated Anki decks
+decks/*.apkg
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
