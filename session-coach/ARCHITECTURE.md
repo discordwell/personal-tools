@@ -28,7 +28,8 @@ A standalone Python CLI that converts a JSON list of cards into a `.apkg` file u
     ]
 
 **Requirements**
-- Stable note IDs: deterministic hash of `front + back` so re-imports update existing cards rather than duplicating.
+- Stable note IDs: deterministic hash of `front + back` so re-imports update existing cards rather than duplicating. The hash key is length-framed (`len(front):front+back`) so it maps `(front, back)` injectively — a plain newline join would let two distinct cards collide on one GUID.
+- In-build dedup: cards with identical `front + back` share a GUID, so Anki would collapse them on import; the builder drops later duplicates, warns on stderr, and reports the true note count.
 - Tags map to Anki tags on the note.
 - Subdeck routing: if a card has tags, it goes in `<deck_name>::<first_tag>`; untagged cards go in the parent deck.
 - Pin `genanki` version in `requirements.txt`.
@@ -39,7 +40,7 @@ A Claude Code skill (`SKILL.md` + optional helper scripts) invoked manually by t
 
 1. Enumerate JSONL session files in `~/.claude/projects/`.
 2. Filter to last 7 days (default), or last N sessions, configurable via skill args.
-3. Read transcripts and identify:
+3. Read transcripts (via `lib/summarize_session.py`, which classifies harness-injected user records — caveats, command output, reminders — as `meta` so they are excluded from the user-signal scans below) and identify:
    - **Thrashing** — repeated tool calls with similar inputs, edit/revert/edit cycles, retry loops.
    - **Tool confusion** — failed tool calls, fallback to Bash when a dedicated tool exists, wrong-tool patterns.
    - **User corrections / pain points** — restatements, pushback, frustration.

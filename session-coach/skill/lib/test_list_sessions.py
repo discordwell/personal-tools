@@ -58,8 +58,20 @@ def test_missing_root_errors():
     assert "not found" in proc.stderr
 
 
+def test_rejects_negative_count_and_days():
+    # A negative --count would slice jsonls[:-1] and drop the OLDEST file instead
+    # of returning nothing; a negative --days yields a future cutoff. Reject both.
+    with tempfile.TemporaryDirectory() as td:
+        _make_tree(td)
+        for flag in ("--count", "--days"):
+            proc = _run("--root", td, flag, "-1")
+            assert proc.returncode != 0, f"{flag} -1 should be rejected"
+            assert "must be >= 0" in proc.stderr, f"got: {proc.stderr!r}"
+
+
 if __name__ == "__main__":
     test_filters_small_files_and_warns()
     test_no_warning_when_nothing_skipped()
     test_missing_root_errors()
+    test_rejects_negative_count_and_days()
     print("OK")

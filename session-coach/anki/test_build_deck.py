@@ -27,10 +27,10 @@ def count_expected_notes(sample: Path) -> int:
     )
 
 
-def run_cli(output: Path) -> subprocess.CompletedProcess[str]:
+def run_cli(output: Path, input_path: Path = SAMPLE) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         [sys.executable, str(BUILD),
-         "--input", str(SAMPLE),
+         "--input", str(input_path),
          "--output", str(output),
          "--deck-name", DECK_NAME],
         capture_output=True, text=True,
@@ -87,7 +87,39 @@ def test_overwrite_warning() -> None:
         )
 
 
+def test_note_id_is_injective_across_boundary() -> None:
+    # Two distinct cards whose front/back differ only by where a newline sits
+    # must NOT share a GUID (else one clobbers the other on import).
+    sys.path.insert(0, str(HERE))
+    from build_deck import note_id
+
+    assert note_id("a\nb", "c") != note_id("a", "b\nc")
+    # Identical content still maps to one stable GUID (re-import updates, not dupes).
+    assert note_id("same", "card") == note_id("same", "card")
+
+
+def test_duplicate_cards_are_deduped() -> None:
+    # Same front+back in two cards collapse to one note on import; the builder
+    # should drop the duplicate, warn, and report the true count.
+    cards = [
+        {"front": "Q", "back": "A", "tags": ["x"]},
+        {"front": "Q", "back": "A", "tags": ["y"]},  # duplicate of the first
+        {"front": "Unique", "back": "Z", "tags": []},
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        inp = Path(td) / "cards.json"
+        inp.write_text(json.dumps(cards), encoding="utf-8")
+        out = Path(td) / "deck.apkg"
+        result = run_cli(out, input_path=inp)
+        assert "duplicates an earlier card" in result.stderr, result.stderr
+        assert "wrote 2 note(s)" in result.stdout, result.stdout
+        assert "1 duplicate(s) skipped" in result.stdout, result.stdout
+        assert_valid_apkg(out, expected_notes=2)
+
+
 if __name__ == "__main__":
     test_build_smoke()
     test_overwrite_warning()
+    test_note_id_is_injective_across_boundary()
+    test_duplicate_cards_are_deduped()
     print("OK")

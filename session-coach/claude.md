@@ -10,7 +10,8 @@ See `ARCHITECTURE.md` for the design and component contract.
 - `decks/` — Generated `.apkg` files (gitignored once a repo is initialized).
 
 ## Build / dev
-- Anki tool: `pip install -r anki/requirements.txt`
+- From the repo root: `make venv` (one-time) then `make test` runs the whole suite.
+- Anki tool only: `pip install -r anki/requirements.txt`
 - Smoke test: `python anki/build_deck.py --input anki/sample_cards.json --output /tmp/test.apkg --deck-name "Smoke Test"`
 
 ## Install skill

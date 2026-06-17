@@ -17,7 +17,7 @@ Parse the user's argument string for `days=N` or `count=N`. Defaults: `days=7`. 
 Resolve absolute paths up front. The skill lives at `/Users/discordwell/Projects/personal-tools/session-coach/skill/` (symlinked into `~/.claude/skills/session-coach/`). Use the source path for invoking helpers — both resolve identically. The helpers are:
 
 - `lib/list_sessions.py` — enumerate session JSONL files filtered by mtime, newest-first. Flags: `--days N`, `--count N`.
-- `lib/summarize_session.py` — distill a JSONL into a compact NDJSON event list (header + one event per line: `user_msg`, `user_interrupt`, `assistant_text`, `tool_use`, `tool_result`). Flags: `--max-text N` (per-event char cap, default 240), `--max-events N` (total cap, default 2000; events beyond the cap are elided from the middle).
+- `lib/summarize_session.py` — distill a JSONL into a compact NDJSON event list (header + one event per line: `user_msg`, `user_interrupt`, `meta`, `assistant_text`, `tool_use`, `tool_result`). `meta` events are harness-injected user records (caveats, command output, system reminders) — they are *not* things the user typed, so do not treat them as user signal. Flags: `--max-text N` (per-event char cap, default 240, must be ≥1), `--max-events N` (total cap, default 2000, must be ≥1; events beyond the cap are elided from the middle).
 
 ## Procedure
 
@@ -39,7 +39,7 @@ Do not dump the raw output back to the user. Use it only to derive the patterns 
 
 ### Step 3 — Detect patterns across all sessions
 
-Scan events for these signals. Build evidence lists keyed by pattern, each entry citing one session slug + a short paraphrase or quote.
+Scan events for these signals. Build evidence lists keyed by pattern, each entry citing one session slug + a short paraphrase or quote. Ignore `meta` events entirely — they are harness injections, not user turns, and counting them as pushback or knowledge gaps produces false signals.
 
 - **Thrashing** — same `tool_use.name` + near-identical `input_brief` repeated within ~10 events; Edit-then-Edit cycles on the same `file_path`; Bash retry loops where `tool_result.ok` is false multiple times in a row; the same `file_path` Read more than 3 times in a session.
 - **Tool confusion** — `tool_result.ok=false` followed by a different tool succeeding; Bash `cat`/`head`/`tail`/`sed`/`awk`/`echo > file` when Read/Edit/Write would have worked; multiple Glob/Grep calls before finding a file Claude could have Read directly given the user's hint.

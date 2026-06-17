@@ -14,11 +14,21 @@ import time
 from pathlib import Path
 
 
+def nonneg_int(value: str) -> int:
+    # Guard against negatives: a negative --count would slice with Python's
+    # negative-index semantics (e.g. jsonls[:-1] drops the OLDEST file instead
+    # of returning nothing), and a negative --days yields a future cutoff.
+    n = int(value)
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
+    return n
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     g = p.add_mutually_exclusive_group()
-    g.add_argument("--days", type=int, help="Include files modified within last N days.")
-    g.add_argument("--count", type=int, help="Include the most-recently-modified N files.")
+    g.add_argument("--days", type=nonneg_int, help="Include files modified within last N days.")
+    g.add_argument("--count", type=nonneg_int, help="Include the most-recently-modified N files.")
     p.add_argument(
         "--root",
         default=os.path.expanduser("~/.claude/projects"),

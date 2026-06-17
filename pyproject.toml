@@ -1,0 +1,11 @@
+# Monorepo-wide tooling config. Each tool keeps its own runtime deps
+# (e.g. session-coach/anki/requirements.txt); this file only configures pytest
+# so `pytest` from the repo root discovers every tool's tests.
+[tool.pytest.ini_options]
+testpaths = ["session-coach"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+# importlib mode: tests aren't packages (no __init__.py), so this avoids the
+# "import file mismatch" failure when two tools ship a test file with the same
+# basename (e.g. test_cli.py) — collection would otherwise break repo-wide.
+addopts = "--import-mode=importlib"

@@ -10,6 +10,8 @@ is a parser only.
 Event kinds:
     user_msg            text=...               (from user role, text content)
     user_interrupt      text=...               (interruption / corrections)
+    meta                text=...               (harness-injected user record: caveats,
+                                                command output, reminders — not typed)
     assistant_text      text=...               (assistant prose only, no tools)
     tool_use            name, input_brief, id  (tool call)
     tool_result         id, ok, brief          (tool output, ok=False if error)
@@ -26,13 +28,36 @@ import sys
 from typing import Any
 
 
+def _positive_int(value: str) -> int:
+    # Both caps must be >= 1: max-text feeds _truncate (n<1 degenerates), and
+    # max-events feeds the elision split `(n-1)//3` (n<1 would over/under-keep).
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
 def _truncate(s: str, n: int) -> str:
     s = s.replace("\n", " ")
+    if n < 1:
+        # Degenerate cap; "s[:n-1] + …" would wrap to a negative index and leak
+        # most of the string (e.g. n=0 -> s[:-1]). Emit nothing instead.
+        return ""
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
 def _is_interrupt_text(text: str) -> bool:
     return text.lstrip().startswith("[Request interrupted by user")
+
+
+def _user_text_kind(text: str, is_meta: bool) -> str:
+    """Classify a user-role text block. Harness-injected records (isMeta) are
+    things the user never typed — command output, caveats, system reminders —
+    so they get their own ``meta`` kind and are excluded from the skill's
+    pushback / knowledge-gap scans, which only look at real ``user_msg`` text."""
+    if is_meta:
+        return "meta"
+    return "user_interrupt" if _is_interrupt_text(text) else "user_msg"
 
 
 def _input_brief(name: str, inp: Any, max_text: int) -> str:
@@ -82,8 +107,8 @@ def _result_brief(content: Any, max_text: int) -> tuple[bool, str]:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("path", help="Path to session .jsonl")
-    p.add_argument("--max-text", type=int, default=240, help="Per-event text length cap.")
-    p.add_argument("--max-events", type=int, default=2000, help="Total events cap (oldest first).")
+    p.add_argument("--max-text", type=_positive_int, default=240, help="Per-event text length cap (>=1).")
+    p.add_argument("--max-events", type=_positive_int, default=2000, help="Total events cap, oldest first (>=1).")
     args = p.parse_args()
 
     if not os.path.exists(args.path):
@@ -121,8 +146,9 @@ def main() -> int:
             if t == "user":
                 msg = obj.get("message", {})
                 content = msg.get("content")
+                is_meta = bool(obj.get("isMeta"))
                 if isinstance(content, str):
-                    kind = "user_interrupt" if _is_interrupt_text(content) else "user_msg"
+                    kind = _user_text_kind(content, is_meta)
                     out.append({"idx": idx, "ts": ts, "kind": kind, "text": _truncate(content, args.max_text)})
                 elif isinstance(content, list):
                     for block in content:
@@ -140,7 +166,7 @@ def main() -> int:
                             })
                         elif block.get("type") == "text":
                             text = str(block.get("text", ""))
-                            kind = "user_interrupt" if _is_interrupt_text(text) else "user_msg"
+                            kind = _user_text_kind(text, is_meta)
                             out.append({"idx": idx, "ts": ts, "kind": kind, "text": _truncate(text, args.max_text)})
                 continue
 
@@ -187,7 +213,10 @@ def main() -> int:
         head = (args.max_events - 1) // 3
         tail = (args.max_events - 1) - head
         skipped = len(out) - head - tail
-        out = out[:head] + [{"kind": "elided", "skipped": skipped}] + out[-tail:]
+        # Guard tail==0: out[-0:] is out[0:] (the whole list), so an empty tail
+        # would leak every event. Use an explicit empty slice instead.
+        tail_events = out[-tail:] if tail else []
+        out = out[:head] + [{"kind": "elided", "skipped": skipped}] + tail_events
 
     for e in out:
         print(json.dumps(e, ensure_ascii=False))

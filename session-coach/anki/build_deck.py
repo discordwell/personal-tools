@@ -25,7 +25,11 @@ def stable_id(kind: str, key: str) -> int:
 
 def note_id(front: str, back: str) -> int:
     # Spec calls out front+back (not tags) so editing tags doesn't reshuffle IDs.
-    return stable_id("note", f"{front}\n{back}")
+    # Length-frame the front so (front, back) maps injectively to the key string.
+    # A plain "{front}\n{back}" join collides whenever a newline can migrate
+    # across the boundary, e.g. ("a\nb", "c") and ("a", "b\nc") — two distinct
+    # cards that would then share a GUID and clobber each other on import.
+    return stable_id("note", f"{len(front)}:{front}{back}")
 
 
 def deck_id(deck_path: str) -> int:
@@ -113,10 +117,24 @@ def build(input_path: Path, output_path: Path, deck_name: str) -> int:
         return decks[path]
 
     note_count = 0
+    duplicate_count = 0
+    seen_guids: set[str] = set()
     for idx, raw in enumerate(raw_cards):
         card = normalize_card(raw, idx)
         if card is None:
             continue
+        guid = str(note_id(card["front"], card["back"]))
+        # Cards with identical front+back share a GUID, so Anki would collapse
+        # them to one note on import regardless of which deck they land in.
+        # Skip the duplicate here so the reported count matches what imports.
+        if guid in seen_guids:
+            print(
+                f"warning: card #{idx} duplicates an earlier card (same front/back), skipping",
+                file=sys.stderr,
+            )
+            duplicate_count += 1
+            continue
+        seen_guids.add(guid)
         if card["tags"]:
             target = f"{deck_name}::{card['tags'][0]}"
         else:
@@ -125,7 +143,7 @@ def build(input_path: Path, output_path: Path, deck_name: str) -> int:
             model=model,
             fields=[render_field(card["front"]), render_field(card["back"])],
             tags=card["tags"],
-            guid=str(note_id(card["front"], card["back"])),
+            guid=guid,
         )
         get_deck(target).add_note(note)
         note_count += 1
@@ -140,7 +158,10 @@ def build(input_path: Path, output_path: Path, deck_name: str) -> int:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     genanki.Package(list(decks.values())).write_to_file(str(output_path))
-    print(f"wrote {note_count} note(s) across {len(decks)} deck(s) to {output_path}")
+    summary = f"wrote {note_count} note(s) across {len(decks)} deck(s) to {output_path}"
+    if duplicate_count:
+        summary += f" ({duplicate_count} duplicate(s) skipped)"
+    print(summary)
     return 0
 
 

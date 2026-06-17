@@ -1,0 +1,6 @@
+# Dev / test dependencies for the personal-tools monorepo.
+# Install into the project venv with `make venv`, or:
+#   python3 -m venv session-coach/anki/.venv
+#   session-coach/anki/.venv/bin/python -m pip install -r requirements-dev.txt
+-r session-coach/anki/requirements.txt
+pytest>=8,<9
