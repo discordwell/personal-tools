@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """Distill a Claude Code JSONL transcript into a compact event list for analysis.
 
-Reads one .jsonl session file and emits NDJSON to stdout — one structured event
-per line. Each event has: idx, ts, kind, and kind-specific fields. The output
-is bounded (long strings truncated) so a Claude reading it can fit many sessions
-in context. The skill (Claude) does the actual pattern detection; this script
-is a parser only.
+Reads one .jsonl session file and emits NDJSON to stdout. The first line is
+always a `header` (path, sessionId, title, lastPrompt, eventCount, malformed);
+each subsequent line is one structured event with: idx, ts, kind, and
+kind-specific fields. The output is bounded (long strings truncated) so a Claude
+reading it can fit many sessions in context. The skill (Claude) does the actual
+pattern detection; this script is a parser only.
 
 Event kinds:
-    user_msg            text=...               (from user role, text content)
+    user_msg            text=...               (from user role, typed text)
     user_interrupt      text=...               (interruption / corrections)
     meta                text=...               (harness-injected user record: caveats,
                                                 command output, reminders — not typed)
     assistant_text      text=...               (assistant prose only, no tools)
     tool_use            name, input_brief, id  (tool call)
-    tool_result         id, ok, brief          (tool output, ok=False if error)
-    summary             title                  (ai-title or last-prompt)
+    tool_result         id, ok, brief          (tool output, ok=False if the call errored)
+    elided              skipped=N              (marks events dropped to satisfy --max-events)
 
 Usage:
     summarize_session.py path/to/session.jsonl [--max-text N] [--max-events N]
@@ -68,10 +69,12 @@ def _input_brief(name: str, inp: Any, max_text: int) -> str:
     if name == "Bash":
         return _truncate(str(inp.get("command", "")), max_text)
     if name == "Edit":
-        return _truncate(
-            f"{inp.get('file_path', '?')} :: {inp.get('old_string', '')[:60]} -> {inp.get('new_string', '')[:60]}",
-            max_text,
-        )
+        # Coerce via str() before slicing: a malformed record with a null
+        # old_string/new_string would otherwise raise on None[:60] and abort the
+        # whole session summary over one bad line.
+        old = str(inp.get("old_string") or "")[:60]
+        new = str(inp.get("new_string") or "")[:60]
+        return _truncate(f"{inp.get('file_path', '?')} :: {old} -> {new}", max_text)
     if name == "Write":
         return _truncate(f"{inp.get('file_path', '?')} ({len(str(inp.get('content', '')))} chars)", max_text)
     if name == "Read":
@@ -85,12 +88,21 @@ def _input_brief(name: str, inp: Any, max_text: int) -> str:
         return _truncate(str(inp), max_text)
 
 
-def _result_brief(content: Any, max_text: int) -> tuple[bool, str]:
-    """Return (ok, brief) for a tool_result content array."""
+def _result_brief(content: Any, max_text: int, block_is_error: Any = False) -> tuple[bool, str]:
+    """Return (ok, brief) for a tool_result block.
+
+    ``block_is_error`` is the tool_result block's own ``is_error`` flag. In real
+    Claude Code transcripts this is where errors live — the block carries
+    ``is_error: true`` alongside a *string* ``content`` (a failed Bash run, a
+    file-not-found, etc.). Earlier this function only saw ``content`` and only
+    scanned inner list items for a marker, so every string-content error was
+    reported as ok=True, silently defeating the skill's tool-confusion scan.
+    We OR the block-level flag with any inner-list marker (a fallback for
+    structured content) so both shapes are caught."""
+    is_error = bool(block_is_error)
     if isinstance(content, str):
-        return True, _truncate(content, max_text)
+        return (not is_error), _truncate(content, max_text)
     text_parts: list[str] = []
-    is_error = False
     if isinstance(content, list):
         for block in content:
             if not isinstance(block, dict):
@@ -155,7 +167,9 @@ def main() -> int:
                         if not isinstance(block, dict):
                             continue
                         if block.get("type") == "tool_result":
-                            ok, brief = _result_brief(block.get("content"), args.max_text)
+                            ok, brief = _result_brief(
+                                block.get("content"), args.max_text, block.get("is_error")
+                            )
                             out.append({
                                 "idx": idx,
                                 "ts": ts,

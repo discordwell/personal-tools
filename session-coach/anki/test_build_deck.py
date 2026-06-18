@@ -98,6 +98,23 @@ def test_note_id_is_injective_across_boundary() -> None:
     assert note_id("same", "card") == note_id("same", "card")
 
 
+def test_render_field_escapes_and_preserves_whitespace() -> None:
+    # render_field is the field-HTML contract: escape HTML special chars, but
+    # keep newlines and indentation verbatim (the model CSS uses white-space:
+    # pre-wrap to render them), so code-snippet backs survive intact.
+    sys.path.insert(0, str(HERE))
+    from build_deck import render_field
+
+    # HTML metacharacters are entity-encoded so they don't break the card markup.
+    assert render_field("<em>x</em> & y") == "&lt;em&gt;x&lt;/em&gt; &amp; y"
+    # Newlines are NOT collapsed to spaces or <br> — kept literal for pre-wrap.
+    assert render_field("line one\nline two") == "line one\nline two"
+    # Leading indentation (e.g. a code block) is preserved character-for-character.
+    assert render_field("def f():\n    return 1") == "def f():\n    return 1"
+    # Quotes stay intact: fields are HTML content, not attribute values.
+    assert render_field('say "hi"') == 'say "hi"'
+
+
 def test_duplicate_cards_are_deduped() -> None:
     # Same front+back in two cards collapse to one note on import; the builder
     # should drop the duplicate, warn, and report the true count.
@@ -121,5 +138,6 @@ if __name__ == "__main__":
     test_build_smoke()
     test_overwrite_warning()
     test_note_id_is_injective_across_boundary()
+    test_render_field_escapes_and_preserves_whitespace()
     test_duplicate_cards_are_deduped()
     print("OK")

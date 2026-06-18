@@ -8,7 +8,13 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from summarize_session import _is_interrupt_text, _truncate, _user_text_kind
+from summarize_session import (
+    _input_brief,
+    _is_interrupt_text,
+    _result_brief,
+    _truncate,
+    _user_text_kind,
+)
 
 
 def test_is_interrupt_text():
@@ -45,6 +51,63 @@ def test_truncate_handles_small_caps():
     assert _truncate("hello", 1) == "…"
 
 
+def test_result_brief_honors_block_level_is_error():
+    # The real Claude Code schema puts is_error on the tool_result block itself,
+    # alongside *string* content (failed Bash, file-not-found, ...). The parser
+    # must report ok=False for these, or the skill's tool-confusion scan — which
+    # keys off tool_result.ok — never fires.
+    ok, brief = _result_brief("bash: command not found", 240, True)
+    assert ok is False, "block-level is_error on string content must yield ok=False"
+    assert brief == "bash: command not found"
+
+    # No error flag -> ok=True.
+    ok, brief = _result_brief("all good", 240, False)
+    assert ok is True
+    # Missing flag defaults to ok=True (the common success case).
+    ok, _ = _result_brief("all good", 240)
+    assert ok is True
+
+
+def test_result_brief_list_content_and_inner_markers():
+    # List content with a block-level error flag, text + image parts joined.
+    ok, brief = _result_brief(
+        [{"type": "text", "text": "line one"}, {"type": "image"}], 240, True
+    )
+    assert ok is False
+    assert brief == "line one | [image]"
+
+    # Inner-list marker (no block-level flag) is still caught as a fallback.
+    ok, _ = _result_brief([{"type": "text", "text": "boom", "is_error": True}], 240)
+    assert ok is False
+    ok, _ = _result_brief([{"type": "tool_use_error", "text": "x"}], 240)
+    assert ok is False
+
+    # Clean list content -> ok=True.
+    ok, brief = _result_brief([{"type": "text", "text": "fine"}], 240)
+    assert ok is True
+    assert brief == "fine"
+
+
+def test_input_brief_renders_known_tools():
+    assert _input_brief("Bash", {"command": "ls -la"}, 240) == "ls -la"
+    assert _input_brief("Read", {"file_path": "/tmp/a.py"}, 240) == "/tmp/a.py"
+    assert "/tmp/a.py" in _input_brief("Edit", {"file_path": "/tmp/a.py", "old_string": "x", "new_string": "y"}, 240)
+    assert "5 chars" in _input_brief("Write", {"file_path": "/tmp/a.py", "content": "hello"}, 240)
+    # Grep/Glob keep only the search-relevant keys.
+    g = _input_brief("Grep", {"pattern": "TODO", "path": "src", "output_mode": "content"}, 240)
+    assert "TODO" in g and "src" in g and "output_mode" not in g
+    # Unknown tool falls back to a compact JSON dump.
+    assert _input_brief("Task", {"a": 1}, 240) == '{"a":1}'
+    # Non-dict input is stringified, not crashed.
+    assert _input_brief("Whatever", "raw", 240) == "raw"
+
+
+def test_input_brief_edit_survives_null_fields():
+    # A malformed Edit record with null old/new_string must not crash (None[:60]).
+    out = _input_brief("Edit", {"file_path": "/tmp/a.py", "old_string": None, "new_string": None}, 240)
+    assert "/tmp/a.py" in out
+
+
 def _run(path: str, *extra_args: str) -> list[dict]:
     proc = subprocess.run(
         [sys.executable, os.path.join(HERE, "summarize_session.py"), path, *extra_args],
@@ -77,6 +140,37 @@ def test_classification_on_fixture():
         # The third record is isMeta -> classified as "meta", not "user_msg",
         # so the skill's pushback/knowledge-gap scans skip harness injections.
         assert kinds == ["user_msg", "user_interrupt", "meta"], kinds
+    finally:
+        os.unlink(path)
+
+
+def test_tool_result_error_detected_end_to_end():
+    # Regression for the headline bug: a tool_result with block-level is_error
+    # and STRING content (the dominant real-world shape) must surface ok=False so
+    # the skill can see failed tool calls. A clean result stays ok=True.
+    path = _write_jsonl([
+        {"type": "assistant", "timestamp": "t1", "sessionId": "s",
+         "message": {"content": [
+             {"type": "tool_use", "id": "u1", "name": "Bash", "input": {"command": "nope"}},
+         ]}},
+        {"type": "user", "timestamp": "t2", "sessionId": "s",
+         "message": {"content": [
+             {"type": "tool_result", "tool_use_id": "u1",
+              "content": "bash: nope: command not found", "is_error": True},
+         ]}},
+        {"type": "assistant", "timestamp": "t3", "sessionId": "s",
+         "message": {"content": [
+             {"type": "tool_use", "id": "u2", "name": "Bash", "input": {"command": "echo hi"}},
+         ]}},
+        {"type": "user", "timestamp": "t4", "sessionId": "s",
+         "message": {"content": [
+             {"type": "tool_result", "tool_use_id": "u2", "content": "hi"},
+         ]}},
+    ])
+    try:
+        events = _run(path)[1:]  # skip header
+        results = {e["id"]: e["ok"] for e in events if e["kind"] == "tool_result"}
+        assert results == {"u1": False, "u2": True}, results
     finally:
         os.unlink(path)
 
@@ -169,7 +263,12 @@ if __name__ == "__main__":
     test_is_interrupt_text()
     test_user_text_kind()
     test_truncate_handles_small_caps()
+    test_result_brief_honors_block_level_is_error()
+    test_result_brief_list_content_and_inner_markers()
+    test_input_brief_renders_known_tools()
+    test_input_brief_edit_survives_null_fields()
     test_classification_on_fixture()
+    test_tool_result_error_detected_end_to_end()
     test_rejects_nonpositive_caps()
     test_malformed_count_in_header()
     test_elision_bounds_output()

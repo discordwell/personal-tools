@@ -56,7 +56,13 @@ def build_model() -> genanki.Model:
         css=(
             ".card { font-family: -apple-system, system-ui, sans-serif; "
             "font-size: 18px; color: #222; background: #fff; "
-            "text-align: left; padding: 16px; line-height: 1.5; } "
+            "text-align: left; padding: 16px; line-height: 1.5; "
+            # pre-wrap is load-bearing: it preserves the literal newlines and
+            # leading whitespace that render_field leaves in the field, so
+            # multi-line backs and indented code snippets show as authored.
+            # Without it the browser collapses runs of whitespace and indentation
+            # is lost.
+            "white-space: pre-wrap; } "
             "hr#answer { margin: 12px 0; border: 0; border-top: 1px solid #ccc; }"
         ),
     )
@@ -98,9 +104,12 @@ def normalize_card(raw, idx: int) -> dict | None:
 
 
 def render_field(text: str) -> str:
-    # Anki fields are HTML. Escape, then convert newlines to <br> so multi-line
-    # backs render as the user wrote them.
-    return html.escape(text, quote=False).replace("\n", "<br>")
+    # Anki fields are HTML. Escape special chars but otherwise keep the text
+    # verbatim — newlines and leading whitespace included. The model's CSS sets
+    # `white-space: pre-wrap`, so the field renders exactly as authored (multi-
+    # line backs and indented code snippets keep their shape). quote=False leaves
+    # quotes intact since fields are HTML *content*, not attribute values.
+    return html.escape(text, quote=False)
 
 
 def build(input_path: Path, output_path: Path, deck_name: str) -> int:
