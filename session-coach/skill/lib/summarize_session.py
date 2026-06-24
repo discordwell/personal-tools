@@ -4,9 +4,10 @@
 Reads one .jsonl session file and emits NDJSON to stdout. The first line is
 always a `header` (path, sessionId, title, lastPrompt, eventCount, malformed);
 each subsequent line is one structured event with: idx, ts, kind, and
-kind-specific fields. The output is bounded (long strings truncated) so a Claude
-reading it can fit many sessions in context. The skill (Claude) does the actual
-pattern detection; this script is a parser only.
+kind-specific fields. With --stats, a single `stats` line is emitted last. The
+output is bounded (long strings truncated) so a Claude reading it can fit many
+sessions in context. The skill (Claude) interprets the output; this script
+parses and computes mechanical counts only — it does no pattern judgement.
 
 Event kinds:
     user_msg            text=...               (from user role, typed text)
@@ -17,15 +18,18 @@ Event kinds:
     tool_use            name, input_brief, id  (tool call)
     tool_result         id, ok, brief          (tool output, ok=False if the call errored)
     elided              skipped=N              (marks events dropped to satisfy --max-events)
+    stats               <see SessionStats>     (last line, only with --stats; counts the
+                                                FULL session, not the elided subset)
 
 Usage:
-    summarize_session.py path/to/session.jsonl [--max-text N] [--max-events N]
+    summarize_session.py path/to/session.jsonl [--max-text N] [--max-events N] [--stats]
 """
 
 import argparse
 import json
 import os
 import sys
+from collections import Counter
 from typing import Any
 
 
@@ -116,11 +120,104 @@ def _result_brief(content: Any, max_text: int, block_is_error: Any = False) -> t
     return (not is_error), _truncate(" | ".join(text_parts), max_text)
 
 
+class SessionStats:
+    """Deterministic, mechanical tool-usage counts for one session.
+
+    The skill's pattern detection (SKILL.md Step 3) leans on counts that an LLM
+    reading many sessions of NDJSON tends to get wrong: how many tool calls
+    errored (and which tools), which files were Read more than 3 times, where
+    Edits churned on a single file. Those are exact and unambiguous, so we
+    compute them here and let the skill *interpret* them.
+
+    We deliberately do NOT flag the "Bash cat/head/tail/sed/awk instead of Read"
+    tool-confusion pattern mechanically. On real transcripts a regex for it
+    matches ~79% of Bash commands — pipes into ``head``/``tail``, ``cat <<EOF``
+    heredocs, ``echo ... > /dev/null`` — so it is not reliably countable. That
+    judgement stays with the skill, which can read the command and decide.
+    """
+
+    def __init__(self) -> None:
+        self.user_msgs = 0
+        self.interrupts = 0
+        self.assistant_texts = 0
+        self.tool_calls = 0
+        self.tool_errors = 0
+        self.tool_use_by_name: Counter = Counter()
+        self.tool_errors_by_name: Counter = Counter()
+        self.read_counts: Counter = Counter()  # Read file_path -> times read
+        self.edit_runs: Counter = Counter()     # file_path -> back-to-back edits (run len >=2)
+        self._name_by_id: dict = {}             # tool_use_id -> tool name
+        self._last_edit_file = None
+
+    def observe_user_text(self, kind: str) -> None:
+        if kind == "user_msg":
+            self.user_msgs += 1
+        elif kind == "user_interrupt":
+            self.interrupts += 1
+        # `meta` is a harness injection, not a user turn — not counted.
+
+    def observe_assistant_text(self) -> None:
+        self.assistant_texts += 1
+
+    def observe_tool_use(self, name: str, inp: Any, tool_id: Any) -> None:
+        self.tool_calls += 1
+        self.tool_use_by_name[name] += 1
+        if isinstance(tool_id, str):
+            self._name_by_id[tool_id] = name
+        fp = inp.get("file_path") if isinstance(inp, dict) else None
+        fp = fp if isinstance(fp, str) and fp else None
+        if name == "Read":
+            if fp:
+                self.read_counts[fp] += 1
+        elif name == "Edit":
+            # Count an Edit whose target equals the immediately preceding Edit's
+            # target. Intervening non-Edit tools don't break the run, so the
+            # classic edit/test/edit churn still shows; an Edit to a *different*
+            # file resets it. N consecutive edits to one file -> N-1 here.
+            if fp and fp == self._last_edit_file:
+                self.edit_runs[fp] += 1
+            self._last_edit_file = fp
+
+    def observe_tool_result(self, tool_id: Any, ok: bool) -> None:
+        if ok:
+            return
+        self.tool_errors += 1
+        name = self._name_by_id.get(tool_id, "?") if isinstance(tool_id, str) else "?"
+        self.tool_errors_by_name[name] += 1
+
+    @staticmethod
+    def _ranked(counter: Counter) -> dict:
+        # Count desc, then key asc: deterministic order (SKILL.md requires
+        # same inputs -> same surfaced patterns).
+        return {k: v for k, v in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))}
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": "stats",
+            "userMsgs": self.user_msgs,
+            "interrupts": self.interrupts,
+            "assistantTexts": self.assistant_texts,
+            "toolCalls": self.tool_calls,
+            "toolErrors": self.tool_errors,
+            "toolUseByName": self._ranked(self.tool_use_by_name),
+            "toolErrorsByName": self._ranked(self.tool_errors_by_name),
+            # Only files read >3 times — the SKILL.md re-read thrash threshold.
+            "filesReadGt3": {k: v for k, v in self._ranked(self.read_counts).items() if v > 3},
+            # Any entry means >=2 consecutive edits to that file.
+            "editRunsByFile": self._ranked(self.edit_runs),
+        }
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("path", help="Path to session .jsonl")
     p.add_argument("--max-text", type=_positive_int, default=240, help="Per-event text length cap (>=1).")
     p.add_argument("--max-events", type=_positive_int, default=2000, help="Total events cap, oldest first (>=1).")
+    p.add_argument(
+        "--stats",
+        action="store_true",
+        help="Emit a final `stats` line with deterministic tool-usage counts for the full session.",
+    )
     args = p.parse_args()
 
     if not os.path.exists(args.path):
@@ -128,6 +225,7 @@ def main() -> int:
         return 1
 
     out: list[dict] = []
+    stats = SessionStats()
     session_id = None
     title = None
     last_prompt = None
@@ -162,6 +260,7 @@ def main() -> int:
                 if isinstance(content, str):
                     kind = _user_text_kind(content, is_meta)
                     out.append({"idx": idx, "ts": ts, "kind": kind, "text": _truncate(content, args.max_text)})
+                    stats.observe_user_text(kind)
                 elif isinstance(content, list):
                     for block in content:
                         if not isinstance(block, dict):
@@ -178,10 +277,12 @@ def main() -> int:
                                 "ok": ok,
                                 "brief": brief,
                             })
+                            stats.observe_tool_result(block.get("tool_use_id"), ok)
                         elif block.get("type") == "text":
                             text = str(block.get("text", ""))
                             kind = _user_text_kind(text, is_meta)
                             out.append({"idx": idx, "ts": ts, "kind": kind, "text": _truncate(text, args.max_text)})
+                            stats.observe_user_text(kind)
                 continue
 
             if t == "assistant":
@@ -197,6 +298,7 @@ def main() -> int:
                         text = str(block.get("text", "")).strip()
                         if text:
                             out.append({"idx": idx, "ts": ts, "kind": "assistant_text", "text": _truncate(text, args.max_text)})
+                            stats.observe_assistant_text()
                     elif btype == "tool_use":
                         name = block.get("name", "?")
                         out.append({
@@ -207,8 +309,11 @@ def main() -> int:
                             "id": block.get("id"),
                             "input_brief": _input_brief(name, block.get("input"), args.max_text),
                         })
+                        stats.observe_tool_use(name, block.get("input"), block.get("id"))
                 continue
-            # Skip permission-mode / file-history-snapshot / system / queue-operation / attachment.
+            # Skip the non-conversational record types observed in real
+            # transcripts: permission-mode / mode / file-history-snapshot /
+            # system / queue-operation / attachment / agent-name.
 
     # Header summary first.
     print(json.dumps({
@@ -234,6 +339,11 @@ def main() -> int:
 
     for e in out:
         print(json.dumps(e, ensure_ascii=False))
+
+    # Stats footer reflects the FULL session (accumulated during the parse,
+    # before elision), so the counts are accurate even when events were dropped.
+    if args.stats:
+        print(json.dumps(stats.to_dict(), ensure_ascii=False))
     return 0
 
 

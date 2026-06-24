@@ -40,11 +40,13 @@ A Claude Code skill (`SKILL.md` + optional helper scripts) invoked manually by t
 
 1. Enumerate JSONL session files in `~/.claude/projects/`.
 2. Filter to last 7 days (default), or last N sessions, configurable via skill args.
-3. Read transcripts (via `lib/summarize_session.py`, which classifies harness-injected user records — caveats, command output, reminders — as `meta` so they are excluded from the user-signal scans below) and identify:
+3. Read transcripts (via `lib/summarize_session.py --stats`, which classifies harness-injected user records — caveats, command output, reminders — as `meta` so they are excluded from the user-signal scans below, and appends a `stats` footer of deterministic per-session counts) and identify:
    - **Thrashing** — repeated tool calls with similar inputs, edit/revert/edit cycles, retry loops.
    - **Tool confusion** — failed tool calls, fallback to Bash when a dedicated tool exists, wrong-tool patterns.
    - **User corrections / pain points** — restatements, pushback, frustration.
    - **Knowledge gaps** — concepts the user asked about, suggesting unfamiliarity.
+
+   **Division of labor.** The parser computes the *mechanical, exact* signals (tool-error counts and the failing tool, files Read >3×, consecutive-Edit churn, tool-use distribution) into the `stats` footer, so the skill counts these from ground truth instead of eyeballing thousands of NDJSON lines — this is what makes the analysis reproducible (`same inputs → same patterns`). The skill makes the *interpretive* judgements the parser can't: whether `user_msg` text is pushback, whether a question signals a knowledge gap, and whether a given Bash command was a Read/Write substitute. The Bash-instead-of-Read pattern is intentionally **not** mechanized — on real transcripts a regex for it matches ~79% of Bash commands (pipes into `head`/`tail`, `cat <<EOF` heredocs), so the skill reads the command and decides.
 4. Produce three outputs:
    - **Journal entry** — append a dated section to `~/.claude/prompting-journal.md` with 3–5 actionable prompting tips, each citing session evidence.
    - **Memory entries** — write `feedback`-type auto-memories per the format documented in `~/CLAUDE.md`, and update the `MEMORY.md` index.

@@ -9,6 +9,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from summarize_session import (
+    SessionStats,
     _input_brief,
     _is_interrupt_text,
     _result_brief,
@@ -106,6 +107,52 @@ def test_input_brief_edit_survives_null_fields():
     # A malformed Edit record with null old/new_string must not crash (None[:60]).
     out = _input_brief("Edit", {"file_path": "/tmp/a.py", "old_string": None, "new_string": None}, 240)
     assert "/tmp/a.py" in out
+
+
+def test_session_stats_counts_are_exact():
+    # Drive the accumulator directly: it must count the mechanical signals the
+    # skill keys off (errors-by-tool, re-reads, edit churn) exactly.
+    s = SessionStats()
+    s.observe_user_text("user_msg")
+    s.observe_user_text("user_interrupt")
+    s.observe_user_text("meta")  # harness injection: must NOT be counted
+    s.observe_assistant_text()
+
+    # Read file A four times (-> filesReadGt3) and B once (below threshold).
+    for i in range(4):
+        s.observe_tool_use("Read", {"file_path": "/A"}, f"r{i}")
+    s.observe_tool_use("Read", {"file_path": "/B"}, "rb")
+
+    # Edit A, A, A (two consecutive repeats -> run 2), then B (resets).
+    s.observe_tool_use("Edit", {"file_path": "/A"}, "e1")
+    s.observe_tool_use("Edit", {"file_path": "/A"}, "e2")
+    s.observe_tool_use("Edit", {"file_path": "/A"}, "e3")
+    s.observe_tool_use("Edit", {"file_path": "/B"}, "e4")
+
+    # One failing Bash (error attributed by id) and one clean Bash.
+    s.observe_tool_use("Bash", {"command": "boom"}, "b1")
+    s.observe_tool_result("b1", ok=False)
+    s.observe_tool_use("Bash", {"command": "ok"}, "b2")
+    s.observe_tool_result("b2", ok=True)
+
+    d = s.to_dict()
+    assert d["userMsgs"] == 1
+    assert d["interrupts"] == 1
+    assert d["assistantTexts"] == 1
+    assert d["toolCalls"] == 5 + 4 + 2  # Read*5 + Edit*4 + Bash*2
+    assert d["toolErrors"] == 1
+    assert d["toolUseByName"] == {"Read": 5, "Edit": 4, "Bash": 2}
+    assert d["toolErrorsByName"] == {"Bash": 1}
+    assert d["filesReadGt3"] == {"/A": 4}      # B (1 read) is below the >3 bar
+    assert d["editRunsByFile"] == {"/A": 2}    # B never repeated consecutively
+
+
+def test_session_stats_ranking_is_deterministic():
+    # Equal counts must tie-break on key name so output is reproducible.
+    s = SessionStats()
+    for name in ("Zebra", "Apple", "Mango"):
+        s.observe_tool_use(name, {}, None)
+    assert list(s.to_dict()["toolUseByName"]) == ["Apple", "Mango", "Zebra"]
 
 
 def _run(path: str, *extra_args: str) -> list[dict]:
@@ -259,6 +306,76 @@ def test_elision_small_caps_stay_bounded():
         os.unlink(path)
 
 
+def test_stats_footer_end_to_end():
+    # The --stats line is emitted LAST, reflects the full session, and attributes
+    # the error to the failing tool by pairing tool_use id -> tool_result id.
+    path = _write_jsonl([
+        {"type": "user", "timestamp": "t1", "sessionId": "s", "message": {"content": "a question"}},
+        {"type": "assistant", "timestamp": "t2", "sessionId": "s",
+         "message": {"content": [
+             {"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "nope"}},
+         ]}},
+        {"type": "user", "timestamp": "t3", "sessionId": "s",
+         "message": {"content": [
+             {"type": "tool_result", "tool_use_id": "b1", "content": "not found", "is_error": True},
+         ]}},
+        {"type": "assistant", "timestamp": "t4", "sessionId": "s",
+         "message": {"content": [
+             {"type": "tool_use", "id": "e1", "name": "Edit",
+              "input": {"file_path": "/f", "old_string": "x", "new_string": "y"}},
+             {"type": "tool_use", "id": "e2", "name": "Edit",
+              "input": {"file_path": "/f", "old_string": "y", "new_string": "z"}},
+         ]}},
+    ])
+    try:
+        lines = _run(path, "--stats")
+        assert lines[0]["kind"] == "header"
+        assert lines[-1]["kind"] == "stats", f"stats must be the final line, got {lines[-1]['kind']}"
+        stats = lines[-1]
+        assert stats["userMsgs"] == 1
+        assert stats["toolCalls"] == 3  # 1 Bash + 2 Edits
+        assert stats["toolErrors"] == 1
+        assert stats["toolErrorsByName"] == {"Bash": 1}
+        assert stats["editRunsByFile"] == {"/f": 1}  # two consecutive edits to /f
+        # Exactly one stats line, and no event before it carries kind=stats.
+        assert sum(1 for e in lines if e["kind"] == "stats") == 1
+    finally:
+        os.unlink(path)
+
+
+def test_no_stats_line_without_flag():
+    # Backward-compat: default output is unchanged — no stats footer at all.
+    path = _write_jsonl([
+        {"type": "user", "timestamp": "t1", "sessionId": "s", "message": {"content": "hi"}},
+    ])
+    try:
+        lines = _run(path)  # no --stats
+        assert all(e["kind"] != "stats" for e in lines), "default output must not include a stats line"
+    finally:
+        os.unlink(path)
+
+
+def test_stats_counts_full_session_despite_elision():
+    # Stats are accumulated during the parse (before elision), so they reflect
+    # the whole session even when most events are dropped from the output.
+    n = 40
+    records = [
+        {"type": "user", "timestamp": f"t{i}", "sessionId": "s", "message": {"content": f"msg {i}"}}
+        for i in range(n)
+    ]
+    path = _write_jsonl(records)
+    try:
+        lines = _run(path, "--max-events", "5", "--stats")
+        events = lines[1:-1]  # drop header and trailing stats
+        assert any(e["kind"] == "elided" for e in events), "expected elision at this cap"
+        stats = lines[-1]
+        assert stats["kind"] == "stats"
+        # All 40 user messages counted, even though only a few events were emitted.
+        assert stats["userMsgs"] == n, f"expected {n} userMsgs, got {stats['userMsgs']}"
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     test_is_interrupt_text()
     test_user_text_kind()
@@ -273,4 +390,9 @@ if __name__ == "__main__":
     test_malformed_count_in_header()
     test_elision_bounds_output()
     test_elision_small_caps_stay_bounded()
+    test_session_stats_counts_are_exact()
+    test_session_stats_ranking_is_deterministic()
+    test_stats_footer_end_to_end()
+    test_no_stats_line_without_flag()
+    test_stats_counts_full_session_despite_elision()
     print("OK")

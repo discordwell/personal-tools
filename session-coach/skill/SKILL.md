@@ -17,7 +17,7 @@ Parse the user's argument string for `days=N` or `count=N`. Defaults: `days=7`. 
 Resolve absolute paths up front. The skill lives at `/Users/discordwell/Projects/personal-tools/session-coach/skill/` (symlinked into `~/.claude/skills/session-coach/`). Use the source path for invoking helpers — both resolve identically. The helpers are:
 
 - `lib/list_sessions.py` — enumerate session JSONL files filtered by mtime, newest-first. Flags: `--days N`, `--count N`.
-- `lib/summarize_session.py` — distill a JSONL into a compact NDJSON event list (header + one event per line: `user_msg`, `user_interrupt`, `meta`, `assistant_text`, `tool_use`, `tool_result`). `meta` events are harness-injected user records (caveats, command output, system reminders) — they are *not* things the user typed, so do not treat them as user signal. Flags: `--max-text N` (per-event char cap, default 240, must be ≥1), `--max-events N` (total cap, default 2000, must be ≥1; events beyond the cap are elided from the middle).
+- `lib/summarize_session.py` — distill a JSONL into a compact NDJSON event list (header + one event per line: `user_msg`, `user_interrupt`, `meta`, `assistant_text`, `tool_use`, `tool_result`). `meta` events are harness-injected user records (caveats, command output, system reminders) — they are *not* things the user typed, so do not treat them as user signal. Flags: `--max-text N` (per-event char cap, default 240, must be ≥1), `--max-events N` (total cap, default 2000, must be ≥1; events beyond the cap are elided from the middle), `--stats` (append one final `stats` line with deterministic per-session tool-usage counts — see Step 3).
 
 ## Procedure
 
@@ -29,7 +29,7 @@ Cap the number of sessions analyzed at 25. If more than 25 are returned, take th
 
 ### Step 2 — Summarize each session
 
-For each path, run `python3 /Users/discordwell/Projects/personal-tools/session-coach/skill/lib/summarize_session.py <path>` and read the NDJSON output. The first line is a header (`{"kind":"header", "sessionId", "title", "lastPrompt", "eventCount", "malformed"}`); the rest are events.
+For each path, run `python3 /Users/discordwell/Projects/personal-tools/session-coach/skill/lib/summarize_session.py <path> --stats` and read the NDJSON output. The first line is a header (`{"kind":"header", "sessionId", "title", "lastPrompt", "eventCount", "malformed"}`); the middle lines are events; the **last** line is a `stats` footer (see Step 3) when `--stats` is passed.
 
 Use the header's `title` (and short `sessionId` slug — first 8 chars) as the citation handle: e.g. `[973673b5: "Ask about Claude Code session logging"]`.
 
@@ -41,12 +41,14 @@ Do not dump the raw output back to the user. Use it only to derive the patterns 
 
 Scan events for these signals. Build evidence lists keyed by pattern, each entry citing one session slug + a short paraphrase or quote. Ignore `meta` events entirely — they are harness injections, not user turns, and counting them as pushback or knowledge gaps produces false signals.
 
-- **Thrashing** — same `tool_use.name` + near-identical `input_brief` repeated within ~10 events; Edit-then-Edit cycles on the same `file_path`; Bash retry loops where `tool_result.ok` is false multiple times in a row; the same `file_path` Read more than 3 times in a session.
-- **Tool confusion** — `tool_result.ok=false` followed by a different tool succeeding; Bash `cat`/`head`/`tail`/`sed`/`awk`/`echo > file` when Read/Edit/Write would have worked; multiple Glob/Grep calls before finding a file Claude could have Read directly given the user's hint.
-- **User corrections / pain points** — `user_msg` containing "no", "stop", "don't", "wrong", "that's not", "I said", "again", "still", or `user_interrupt` events; `user_msg` shorter than ~80 chars that immediately follows an assistant tool sequence (often a curt redirect).
-- **Knowledge gaps** — `user_msg` matching "how does X work", "what's the difference", "what is", "why does", "explain", "I don't understand"; topics where the user asked the same kind of question across multiple sessions.
+**Use the `stats` footer for the mechanical signals; do not re-count them by eye.** Each session's footer gives exact, full-session counts (computed before any event elision): `userMsgs`, `interrupts`, `assistantTexts`, `toolCalls`, `toolErrors`, `toolUseByName`, `toolErrorsByName`, `filesReadGt3` (files Read >3× → re-read thrash), and `editRunsByFile` (files with ≥2 consecutive Edits → edit churn). Treat these as ground truth for counting and let the events supply the surrounding narrative/quotes.
 
-A pattern is reportable only if it appears across ≥2 distinct sessions OR is a single high-severity instance (e.g. a clear pushback with explicit frustration).
+- **Thrashing** — read `editRunsByFile` (edit churn) and `filesReadGt3` (re-read loops) straight from the footer; for retry loops, scan events for runs where `tool_result.ok` is false repeatedly (corroborate with `toolErrorsByName`).
+- **Tool confusion** — `toolErrors`/`toolErrorsByName` quantify failed calls (and which tools); then read the surrounding events to judge *why* (e.g. `tool_result.ok=false` followed by a different tool succeeding, or Bash `cat`/`head`/`tail`/`sed`/`awk`/`echo > file` used to inspect/write a file when Read/Edit/Write would have worked). The footer deliberately does **not** flag the Bash-instead-of-Read pattern — a regex for it misfires on most Bash commands (pipes to `head`/`tail`, `cat <<EOF` heredocs), so read the command and judge it yourself.
+- **User corrections / pain points** — `interrupts` counts `user_interrupt` events; also scan `user_msg` text for "no", "stop", "don't", "wrong", "that's not", "I said", "again", "still", and for short (<~80 char) messages that immediately follow an assistant tool sequence (often a curt redirect). These are language judgements — make them from the event text, not the counts.
+- **Knowledge gaps** — `user_msg` matching "how does X work", "what's the difference", "what is", "why does", "explain", "I don't understand"; topics where the user asked the same kind of question across multiple sessions. Also a language judgement from event text.
+
+A pattern is reportable only if it appears across ≥2 distinct sessions OR is a single high-severity instance (e.g. a clear pushback with explicit frustration). When citing a count in the journal, take it from the footer so it is reproducible.
 
 ### Step 4 — Produce outputs
 
