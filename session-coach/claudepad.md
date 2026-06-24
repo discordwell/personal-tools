@@ -2,6 +2,15 @@
 
 ## Session Summaries
 
+### 2026-06-23 (UTC) — land `--stats` footer + mechanize retry-loop detection
+
+Maintenance pass. Two commits (30 tests total, was 27):
+
+- **Landed the WIP `--stats` footer** (`skill/lib/summarize_session.py`). New `SessionStats` accumulates deterministic, full-session counts (before event elision) into a final `stats` line: `userMsgs`, `interrupts`, `assistantTexts`, `toolCalls`, `toolErrors`, `toolUseByName`, `toolErrorsByName` (errors paired to the failing tool via tool_use id), `filesReadGt3` (re-read thrash), `editRunsByFile` (edit churn). This lets the skill count thrashing/tool-confusion signals from ground truth instead of eyeballing NDJSON — the basis for "same inputs → same patterns". Default output unchanged without the flag. SKILL.md/ARCHITECTURE.md document the parser-vs-skill division of labor. Removed one dead attribute (`_edit_run_len`) the WIP left behind.
+- **Mechanized the third thrashing signal — retry loops** (`maxErrorRun`). The WIP mechanized edit-churn and re-read loops but still told the skill to *eyeball* "tool_result.ok false repeatedly", contradicting its own "don't re-count by eye" principle. `maxErrorRun` = longest run of consecutive failing tool_results; a *successful* result resets the streak, intervening tool_use turns (the "try again" turn) do not. `≥2` = a back-to-back failure, `≥3` = a clear loop. SKILL.md Thrashing bullet now reads it from the footer. 3 new tests (unit interleaves tool_use between failures to prove it doesn't reset the streak; e2e drives it through the CLI).
+
+Reviewed via a code-review subagent: core logic confirmed correct/deterministic; one NIT (a unit-test comment overstated its coverage) fixed by interleaving tool_use between the failing results. Committed in two commits; not pushed (orchestrator handles push).
+
 ### 2026-06-18 (UTC) — parser correctness: tool-error detection + card rendering
 
 Maintenance pass. Two real defects fixed, each with tests (22 tests total, was 16):

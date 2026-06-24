@@ -126,8 +126,9 @@ class SessionStats:
     The skill's pattern detection (SKILL.md Step 3) leans on counts that an LLM
     reading many sessions of NDJSON tends to get wrong: how many tool calls
     errored (and which tools), which files were Read more than 3 times, where
-    Edits churned on a single file. Those are exact and unambiguous, so we
-    compute them here and let the skill *interpret* them.
+    Edits churned on a single file, and the longest back-to-back tool-failure
+    streak (a retry loop). Those are exact and unambiguous, so we compute them
+    here and let the skill *interpret* them.
 
     We deliberately do NOT flag the "Bash cat/head/tail/sed/awk instead of Read"
     tool-confusion pattern mechanically. On real transcripts a regex for it
@@ -142,12 +143,14 @@ class SessionStats:
         self.assistant_texts = 0
         self.tool_calls = 0
         self.tool_errors = 0
+        self.max_error_run = 0                   # longest streak of consecutive failing tool_results
         self.tool_use_by_name: Counter = Counter()
         self.tool_errors_by_name: Counter = Counter()
         self.read_counts: Counter = Counter()  # Read file_path -> times read
         self.edit_runs: Counter = Counter()     # file_path -> back-to-back edits (run len >=2)
         self._name_by_id: dict = {}             # tool_use_id -> tool name
         self._last_edit_file = None
+        self._cur_error_run = 0                  # running streak length; reset by any ok result
 
     def observe_user_text(self, kind: str) -> None:
         if kind == "user_msg":
@@ -180,10 +183,19 @@ class SessionStats:
 
     def observe_tool_result(self, tool_id: Any, ok: bool) -> None:
         if ok:
+            # A success ends any retry streak (the call finally worked).
+            self._cur_error_run = 0
             return
         self.tool_errors += 1
         name = self._name_by_id.get(tool_id, "?") if isinstance(tool_id, str) else "?"
         self.tool_errors_by_name[name] += 1
+        # Track the longest run of back-to-back failures. Only tool_results move
+        # the streak — intervening assistant text / tool_use (the "let me try
+        # again" turn) are part of the same retry loop, so they don't reset it;
+        # a *successful* result does. maxErrorRun >= 2 means a real retry loop.
+        self._cur_error_run += 1
+        if self._cur_error_run > self.max_error_run:
+            self.max_error_run = self._cur_error_run
 
     @staticmethod
     def _ranked(counter: Counter) -> dict:
@@ -199,6 +211,8 @@ class SessionStats:
             "assistantTexts": self.assistant_texts,
             "toolCalls": self.tool_calls,
             "toolErrors": self.tool_errors,
+            # Longest run of consecutive failing tool_results — a retry loop.
+            "maxErrorRun": self.max_error_run,
             "toolUseByName": self._ranked(self.tool_use_by_name),
             "toolErrorsByName": self._ranked(self.tool_errors_by_name),
             # Only files read >3 times — the SKILL.md re-read thrash threshold.

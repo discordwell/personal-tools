@@ -141,6 +141,7 @@ def test_session_stats_counts_are_exact():
     assert d["assistantTexts"] == 1
     assert d["toolCalls"] == 5 + 4 + 2  # Read*5 + Edit*4 + Bash*2
     assert d["toolErrors"] == 1
+    assert d["maxErrorRun"] == 1               # one isolated failure, no streak
     assert d["toolUseByName"] == {"Read": 5, "Edit": 4, "Bash": 2}
     assert d["toolErrorsByName"] == {"Bash": 1}
     assert d["filesReadGt3"] == {"/A": 4}      # B (1 read) is below the >3 bar
@@ -153,6 +154,33 @@ def test_session_stats_ranking_is_deterministic():
     for name in ("Zebra", "Apple", "Mango"):
         s.observe_tool_use(name, {}, None)
     assert list(s.to_dict()["toolUseByName"]) == ["Apple", "Mango", "Zebra"]
+
+
+def test_session_stats_max_error_run_is_longest_failure_streak():
+    # maxErrorRun = the longest run of consecutive failing tool_results (a retry
+    # loop). A *successful* result resets the streak; an intervening tool_use
+    # (the "let me try again" turn) does not. The use->fail pairs below are
+    # interleaved on purpose, so this fails if observe_tool_use reset the streak.
+    s = SessionStats()
+    for i in range(3):
+        s.observe_tool_use("Bash", {"command": f"c{i}"}, f"t{i}")
+        s.observe_tool_result(f"t{i}", ok=False)  # streak grows to 3 across turns
+    # A success ends the streak; a later lone failure starts a shorter one.
+    s.observe_tool_use("Read", {"file_path": "/f"}, "ok")
+    s.observe_tool_result("ok", ok=True)
+    s.observe_tool_use("Bash", {"command": "last"}, "t4")
+    s.observe_tool_result("t4", ok=False)  # streak 1 again (doesn't beat 3)
+    d = s.to_dict()
+    assert d["maxErrorRun"] == 3
+    assert d["toolErrors"] == 4  # total failures, regardless of streaks
+
+
+def test_session_stats_max_error_run_zero_without_failures():
+    # No failing result -> no retry loop, even with many successful calls.
+    s = SessionStats()
+    s.observe_tool_use("Read", {"file_path": "/f"}, "r1")
+    s.observe_tool_result("r1", ok=True)
+    assert s.to_dict()["maxErrorRun"] == 0
 
 
 def _run(path: str, *extra_args: str) -> list[dict]:
@@ -335,6 +363,7 @@ def test_stats_footer_end_to_end():
         assert stats["userMsgs"] == 1
         assert stats["toolCalls"] == 3  # 1 Bash + 2 Edits
         assert stats["toolErrors"] == 1
+        assert stats["maxErrorRun"] == 1  # one isolated failure, no streak
         assert stats["toolErrorsByName"] == {"Bash": 1}
         assert stats["editRunsByFile"] == {"/f": 1}  # two consecutive edits to /f
         # Exactly one stats line, and no event before it carries kind=stats.
@@ -376,6 +405,34 @@ def test_stats_counts_full_session_despite_elision():
         os.unlink(path)
 
 
+def test_max_error_run_end_to_end():
+    # Three Bash calls fail back-to-back (each tool_use in its own assistant
+    # record, each result in a user record). The intervening tool_use turns are
+    # part of the retry loop, so the footer must report a streak of 3.
+    records = []
+    for i in range(3):
+        records.append({
+            "type": "assistant", "timestamp": f"a{i}", "sessionId": "s",
+            "message": {"content": [
+                {"type": "tool_use", "id": f"b{i}", "name": "Bash", "input": {"command": f"try {i}"}},
+            ]},
+        })
+        records.append({
+            "type": "user", "timestamp": f"u{i}", "sessionId": "s",
+            "message": {"content": [
+                {"type": "tool_result", "tool_use_id": f"b{i}", "content": "still failing", "is_error": True},
+            ]},
+        })
+    path = _write_jsonl(records)
+    try:
+        stats = _run(path, "--stats")[-1]
+        assert stats["kind"] == "stats"
+        assert stats["maxErrorRun"] == 3, f"expected streak of 3, got {stats['maxErrorRun']}"
+        assert stats["toolErrorsByName"] == {"Bash": 3}
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     test_is_interrupt_text()
     test_user_text_kind()
@@ -392,7 +449,10 @@ if __name__ == "__main__":
     test_elision_small_caps_stay_bounded()
     test_session_stats_counts_are_exact()
     test_session_stats_ranking_is_deterministic()
+    test_session_stats_max_error_run_is_longest_failure_streak()
+    test_session_stats_max_error_run_zero_without_failures()
     test_stats_footer_end_to_end()
     test_no_stats_line_without_flag()
     test_stats_counts_full_session_despite_elision()
+    test_max_error_run_end_to_end()
     print("OK")
