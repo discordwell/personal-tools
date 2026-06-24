@@ -67,7 +67,13 @@ def main() -> int:
                 continue
             jsonls.append((st.st_mtime, f))
 
-    jsonls.sort(key=lambda x: x[0], reverse=True)
+    # Newest first, breaking mtime ties by path (ascending). The tie-break is
+    # load-bearing: iterdir() order is filesystem-dependent, so without it two
+    # transcripts sharing an mtime (batch-created files, or coarse-resolution
+    # filesystems) would order nondeterministically — and with --count N a tie at
+    # the cutoff boundary would then include different sessions run to run. That
+    # breaks the skill's "same inputs -> same patterns surfaced" guarantee.
+    jsonls.sort(key=lambda x: (-x[0], str(x[1])))
 
     if args.count is not None:
         jsonls = jsonls[: args.count]
