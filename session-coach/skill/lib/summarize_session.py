@@ -222,22 +222,16 @@ class SessionStats:
         }
 
 
-def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("path", help="Path to session .jsonl")
-    p.add_argument("--max-text", type=_positive_int, default=240, help="Per-event text length cap (>=1).")
-    p.add_argument("--max-events", type=_positive_int, default=2000, help="Total events cap, oldest first (>=1).")
-    p.add_argument(
-        "--stats",
-        action="store_true",
-        help="Emit a final `stats` line with deterministic tool-usage counts for the full session.",
-    )
-    args = p.parse_args()
+def parse_session(path: str, max_text: int = 240) -> tuple[dict, list[dict], SessionStats]:
+    """Parse one JSONL session file into ``(header, events, stats)``.
 
-    if not os.path.exists(args.path):
-        print(f"error: not found: {args.path}", file=sys.stderr)
-        return 1
-
+    Pure and side-effect free: reads the file, builds the *full* event list
+    (no elision) and accumulates a :class:`SessionStats` over the whole session.
+    ``main`` layers elision + printing on top; ``aggregate_sessions.py`` reuses
+    this to roll the exact per-session counts up across many sessions without
+    re-implementing (or drifting from) the parser. The caller checks existence;
+    an unreadable file raises ``OSError``.
+    """
     out: list[dict] = []
     stats = SessionStats()
     session_id = None
@@ -245,7 +239,7 @@ def main() -> int:
     last_prompt = None
     malformed = 0
 
-    with open(args.path, encoding="utf-8", errors="replace") as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         for idx, raw in enumerate(f):
             if not raw.strip():
                 continue
@@ -273,7 +267,7 @@ def main() -> int:
                 is_meta = bool(obj.get("isMeta"))
                 if isinstance(content, str):
                     kind = _user_text_kind(content, is_meta)
-                    out.append({"idx": idx, "ts": ts, "kind": kind, "text": _truncate(content, args.max_text)})
+                    out.append({"idx": idx, "ts": ts, "kind": kind, "text": _truncate(content, max_text)})
                     stats.observe_user_text(kind)
                 elif isinstance(content, list):
                     for block in content:
@@ -281,7 +275,7 @@ def main() -> int:
                             continue
                         if block.get("type") == "tool_result":
                             ok, brief = _result_brief(
-                                block.get("content"), args.max_text, block.get("is_error")
+                                block.get("content"), max_text, block.get("is_error")
                             )
                             out.append({
                                 "idx": idx,
@@ -295,7 +289,7 @@ def main() -> int:
                         elif block.get("type") == "text":
                             text = str(block.get("text", ""))
                             kind = _user_text_kind(text, is_meta)
-                            out.append({"idx": idx, "ts": ts, "kind": kind, "text": _truncate(text, args.max_text)})
+                            out.append({"idx": idx, "ts": ts, "kind": kind, "text": _truncate(text, max_text)})
                             stats.observe_user_text(kind)
                 continue
 
@@ -311,7 +305,7 @@ def main() -> int:
                     if btype == "text":
                         text = str(block.get("text", "")).strip()
                         if text:
-                            out.append({"idx": idx, "ts": ts, "kind": "assistant_text", "text": _truncate(text, args.max_text)})
+                            out.append({"idx": idx, "ts": ts, "kind": "assistant_text", "text": _truncate(text, max_text)})
                             stats.observe_assistant_text()
                     elif btype == "tool_use":
                         name = block.get("name", "?")
@@ -321,7 +315,7 @@ def main() -> int:
                             "kind": "tool_use",
                             "name": name,
                             "id": block.get("id"),
-                            "input_brief": _input_brief(name, block.get("input"), args.max_text),
+                            "input_brief": _input_brief(name, block.get("input"), max_text),
                         })
                         stats.observe_tool_use(name, block.get("input"), block.get("id"))
                 continue
@@ -329,16 +323,38 @@ def main() -> int:
             # transcripts: permission-mode / mode / file-history-snapshot /
             # system / queue-operation / attachment / agent-name.
 
-    # Header summary first.
-    print(json.dumps({
+    header = {
         "kind": "header",
-        "path": args.path,
+        "path": path,
         "sessionId": session_id,
         "title": title,
-        "lastPrompt": _truncate(last_prompt or "", args.max_text),
+        "lastPrompt": _truncate(last_prompt or "", max_text),
         "eventCount": len(out),
         "malformed": malformed,
-    }))
+    }
+    return header, out, stats
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("path", help="Path to session .jsonl")
+    p.add_argument("--max-text", type=_positive_int, default=240, help="Per-event text length cap (>=1).")
+    p.add_argument("--max-events", type=_positive_int, default=2000, help="Total events cap, oldest first (>=1).")
+    p.add_argument(
+        "--stats",
+        action="store_true",
+        help="Emit a final `stats` line with deterministic tool-usage counts for the full session.",
+    )
+    args = p.parse_args()
+
+    if not os.path.exists(args.path):
+        print(f"error: not found: {args.path}", file=sys.stderr)
+        return 1
+
+    header, out, stats = parse_session(args.path, args.max_text)
+
+    # Header summary first.
+    print(json.dumps(header))
 
     # Cap total events; keep oldest first so flow is readable. Reserve one slot
     # for the elided marker so total output stays bounded by max_events.

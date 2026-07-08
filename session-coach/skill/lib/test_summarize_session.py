@@ -15,6 +15,7 @@ from summarize_session import (
     _result_brief,
     _truncate,
     _user_text_kind,
+    parse_session,
 )
 
 
@@ -181,6 +182,33 @@ def test_session_stats_max_error_run_zero_without_failures():
     s.observe_tool_use("Read", {"file_path": "/f"}, "r1")
     s.observe_tool_result("r1", ok=True)
     assert s.to_dict()["maxErrorRun"] == 0
+
+
+def test_parse_session_returns_header_events_and_full_stats():
+    # parse_session is the reusable core the aggregator builds on: it must return
+    # a well-formed header, the FULL (un-elided) event list, and a live
+    # SessionStats accumulated over the whole session.
+    path = _write_jsonl([
+        {"type": "ai-title", "aiTitle": "My Session"},
+        {"type": "user", "timestamp": "t1", "sessionId": "sid12345", "message": {"content": "hello"}},
+        {"type": "assistant", "timestamp": "t2", "sessionId": "sid12345",
+         "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "x"}}]}},
+        {"type": "user", "timestamp": "t3", "sessionId": "sid12345",
+         "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "content": "boom", "is_error": True}]}},
+    ])
+    try:
+        header, events, stats = parse_session(path)
+        assert header["kind"] == "header"
+        assert header["sessionId"] == "sid12345"
+        assert header["title"] == "My Session"
+        assert header["eventCount"] == len(events) == 3  # user_msg, tool_use, tool_result
+        sd = stats.to_dict()
+        assert sd["userMsgs"] == 1
+        assert sd["toolCalls"] == 1
+        assert sd["toolErrors"] == 1
+        assert sd["toolErrorsByName"] == {"Bash": 1}
+    finally:
+        os.unlink(path)
 
 
 def _run(path: str, *extra_args: str) -> list[dict]:
@@ -435,6 +463,7 @@ def test_max_error_run_end_to_end():
 
 if __name__ == "__main__":
     test_is_interrupt_text()
+    test_parse_session_returns_header_events_and_full_stats()
     test_user_text_kind()
     test_truncate_handles_small_caps()
     test_result_brief_honors_block_level_is_error()

@@ -46,7 +46,9 @@ A Claude Code skill (`SKILL.md` + optional helper scripts) invoked manually by t
    - **User corrections / pain points** — restatements, pushback, frustration.
    - **Knowledge gaps** — concepts the user asked about, suggesting unfamiliarity.
 
-   **Division of labor.** The parser computes the *mechanical, exact* signals (tool-error counts and the failing tool, the longest back-to-back tool-failure streak / retry loop, files Read >3×, consecutive-Edit churn, tool-use distribution) into the `stats` footer, so the skill counts these from ground truth instead of eyeballing thousands of NDJSON lines — this is what makes the analysis reproducible (`same inputs → same patterns`). The skill makes the *interpretive* judgements the parser can't: whether `user_msg` text is pushback, whether a question signals a knowledge gap, and whether a given Bash command was a Read/Write substitute. The Bash-instead-of-Read pattern is intentionally **not** mechanized — on real transcripts a regex for it matches ~79% of Bash commands (pipes into `head`/`tail`, `cat <<EOF` heredocs), so the skill reads the command and decides.
+   Then roll those per-session counts up across every analyzed session with `lib/aggregate_sessions.py` (which reuses the same parser via `summarize_session.parse_session`) to get one deterministic `aggregate` object: cross-session totals, summed tool/error distributions, how many sessions hit each thrash signal, the most-repeated files, and the worst sessions by error count.
+
+   **Division of labor.** The parser computes the *mechanical, exact* signals (tool-error counts and the failing tool, the longest back-to-back tool-failure streak / retry loop, files Read >3×, consecutive-Edit churn, tool-use distribution) into the per-session `stats` footer, and `aggregate_sessions.py` sums them across sessions — so the skill counts *both* per-session and cross-session totals from ground truth instead of eyeballing thousands of NDJSON lines or adding a dozen footers by hand. This is what makes the analysis reproducible (`same inputs → same patterns`): the aggregate is a pure function of the session set (order-independent, byte-identical run to run). The skill makes the *interpretive* judgements the parser can't: whether `user_msg` text is pushback, whether a question signals a knowledge gap, and whether a given Bash command was a Read/Write substitute. The Bash-instead-of-Read pattern is intentionally **not** mechanized — on real transcripts a regex for it matches ~79% of Bash commands (pipes into `head`/`tail`, `cat <<EOF` heredocs), so the skill reads the command and decides.
 4. Produce three outputs:
    - **Journal entry** — append a dated section to `~/.claude/prompting-journal.md` with 3–5 actionable prompting tips, each citing session evidence.
    - **Memory entries** — write `feedback`-type auto-memories per the format documented in `~/CLAUDE.md`, and update the `MEMORY.md` index.
@@ -57,7 +59,13 @@ A Claude Code skill (`SKILL.md` + optional helper scripts) invoked manually by t
     ~/.claude/projects/*.jsonl
             │
             ▼
-       skill (Claude analyzes)
+      list_sessions.py ──► selected session paths
+            │
+            ├──► summarize_session.py --stats  (per-session events + stats footer)
+            └──► aggregate_sessions.py         (one cross-session `aggregate` line)
+            │
+            ▼
+       skill (Claude interprets the mechanical counts)
             │
             ├──► ~/.claude/prompting-journal.md   (append)
             ├──► memory/*.md + MEMORY.md           (write/update)
